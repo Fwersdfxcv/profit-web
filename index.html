@@ -92,6 +92,24 @@
   .preview-table td[contenteditable="true"]{background:#fffbe6;outline:none;box-shadow:inset 0 0 0 1px #f0d878;cursor:text;}
   .preview-table td[contenteditable="true"]:focus{background:#fff4cc;}
   .preview-table tr:hover td{background:#f8fafc;}
+  /* 导出看板 / 复盘报告弹窗 */
+  #export-overlay,#report-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:201;align-items:center;justify-content:center;padding:20px;}
+  #export-card,#report-card{background:#fff;width:100%;max-width:560px;border-radius:12px;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.25);display:flex;flex-direction:column;}
+  #report-card{max-width:1000px;height:92vh;}
+  #export-head,#report-head{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
+  #export-head h3,#report-head h3{margin:0;font-size:16px;}
+  #export-body{padding:16px 18px;}
+  #report-body{flex:1;overflow:auto;padding:18px 24px;background:#fbfcfe;}
+  .report-h1{font-size:22px;font-weight:700;margin:0 0 4px;}
+  .report-meta{font-size:12.5px;color:var(--sub);margin-bottom:6px;}
+  .report-sec{margin:18px 0;}
+  .report-sec h2{font-size:17px;margin:0 0 8px;border-left:4px solid var(--blue);padding-left:8px;}
+  .report-sec img{max-width:100%;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#fff;}
+  .report-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px;}
+  .report-table th,.report-table td{border:1px solid var(--line);padding:6px 8px;text-align:left;white-space:nowrap;}
+  .report-table th{background:#eef2fb;color:var(--sub);font-weight:600;}
+  .report-table td.num,.report-table th.num{text-align:right;font-variant-numeric:tabular-nums;}
+  .report-note{font-size:12px;color:var(--sub);background:#f8fafc;border:1px dashed var(--line);border-radius:8px;padding:10px 12px;margin-top:10px;line-height:1.7;}
 </style>
 </head>
 <body>
@@ -152,6 +170,7 @@
         <button id="preview-raw" class="btn primary" disabled>预览原始数据</button>
         <button id="preview-clean" class="btn primary" disabled>预览清洗后数据</button>
         <button id="preview-profit" class="btn primary" disabled>预览利润表</button>
+        <button id="gen-report" class="btn ghost" disabled style="margin-left:auto;">📝 生成复盘报告</button>
       </div>
       <div style="font-size:12px;color:var(--sub);margin-top:10px;">
         <b>预览说明</b>：在弹窗中查看并修改数据，点击「确认保存」后同步写入浏览器 IndexedDB；若已设置「工作目录」，还会归档到 <code>{编号}__{名称}</code> 子文件夹。点击「导出」可单独下载当前表格/看板文件。
@@ -160,7 +179,10 @@
 
     <section class="dash-card">
       <div class="dh"><h2>📊 利润分析看板</h2>
-        <button id="dash-full" class="btn small ghost">⛶ 全屏</button>
+        <div style="display:flex;gap:8px;">
+          <button id="export-dash" class="btn small ghost">⬇ 导出看板</button>
+          <button id="dash-full" class="btn small ghost">⛶ 全屏</button>
+        </div>
       </div>
       <iframe id="dash-frame" title="利润分析看板" srcdoc=""></iframe>
     </section>
@@ -188,6 +210,54 @@
   </div>
 </div>
 
+<!-- 导出看板弹窗 -->
+<div id="export-overlay" onclick="if(event.target.id==='export-overlay') closeExportModal()">
+  <div id="export-card">
+    <div id="export-head">
+      <div><h3 id="export-title">导出看板</h3>
+        <div id="export-sub" style="font-size:12px;color:var(--sub);">选择区域与格式，导出将保留图表</div></div>
+      <button class="btn small ghost" onclick="closeExportModal()">关闭</button>
+    </div>
+    <div id="export-body">
+      <div class="filter-box">
+        <div class="filter-title">导出区域</div>
+        <select id="export-section" style="width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:8px;font-size:13px;">
+          <option value="">全部（整篇看板）</option>
+          <option value="sec-kpi">总览</option>
+          <option value="sec-daily">日均利润</option>
+          <option value="sec-type">类型维度</option>
+          <option value="sec-neg">负利润 TOP20</option>
+          <option value="sec-risk">刷单对象</option>
+          <option value="sec-top">利润 TOP20</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
+        <button id="export-xlsx" class="btn primary">⬇ 导出 Excel（保留图表）</button>
+        <button id="export-docx" class="btn primary">⬇ 导出 Word（保留图表）</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--sub);margin-top:12px;line-height:1.7;">
+        Excel 内图表以图片形式嵌入工作表；Word 由图表图片 + 文字表格组成，用 Word/WPS 打开即可。图表需在看板渲染完成后导出。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 复盘报告弹窗 -->
+<div id="report-overlay" onclick="if(event.target.id==='report-overlay') closeReportModal()">
+  <div id="report-card">
+    <div id="report-head">
+      <div><h3 id="report-title">利润分析复盘报告</h3>
+        <div id="report-sub" style="font-size:12px;color:var(--sub);"></div></div>
+      <div style="display:flex;gap:8px;">
+        <button id="report-docx" class="btn small primary">⬇ 下载 Word</button>
+        <button id="report-xlsx" class="btn small primary">⬇ 下载 Excel</button>
+        <button class="btn small ghost" onclick="closeReportModal()">关闭</button>
+      </div>
+    </div>
+    <div id="report-body"></div>
+  </div>
+</div>
+
 <!-- 依赖加载顺序：解析 → 写出 → 黑名单 → 内嵌模板/看板/ECharts → 主逻辑 -->
 <script src="./lib/xlsx.full.min.js"></script>
 <script src="./lib/exceljs.min.js"></script>
@@ -196,6 +266,7 @@
 <script src="./lib/embed_template.js"></script>
 <script src="./lib/embed_dashboard.js"></script>
 <script src="./lib/embed_echarts.js"></script>
+<script src="./lib/html-docx.js"></script>
 <script src="./app.js"></script>
 </body>
 </html>

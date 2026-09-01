@@ -999,20 +999,27 @@ async function openFolderItem(dirHandle, folderName){
     const meta=await readFolderMeta(dirHandle);
     if(meta && meta.dashboardData){
       let cleanBlob=null, profitBlob=null, dashHtml=null;
+      let rawBuf2=null;
       try{
         for await (const [name, h] of dirHandle.entries()){
           if(h.kind!=='file') continue;
           if(/_已清洗\.xlsx$/i.test(name)){ const f=await h.getFile(); cleanBlob=new Blob([await f.arrayBuffer()],{type:f.type}); }
           else if(/^项目数据统计口径参考_.*\.xlsx$/i.test(name)){ const f=await h.getFile(); profitBlob=new Blob([await f.arrayBuffer()],{type:f.type}); }
           else if(/_看板\.html$/i.test(name)){ const f=await h.getFile(); dashHtml=await f.text(); }
+          else if(/_源数据\.xlsx$/i.test(name)){ const f=await h.getFile(); rawBuf2=await f.arrayBuffer(); }
         }
       }catch(e){ console.warn('读取输出文件失败', e); }
-      CURRENT={ projectName:meta.projectName||meta.name, tag:meta.tag, raw:null, kept:null, stats:meta.stats||{},
-        paperZero:meta.paperZero, dashboardHtml:dashHtml, data:meta.dashboardData, uploadedAt:meta.uploadedAt||'' };
+      // 重建 raw / kept，让历史（本地文件夹）数据也能预览与编辑
+      let kept=null, raw=null;
+      try{ if(cleanBlob) kept=await cleanBlobToKept(cleanBlob); }catch(e){ console.warn('解析已清洗失败', e); }
+      if(rawBuf2) raw=rawBuf2;
+      CURRENT={ projectName:meta.projectName||meta.name, tag:meta.tag, raw, kept, stats:meta.stats||{},
+        paperZero:meta.paperZero, dashboardHtml:dashHtml, data:meta.dashboardData, uploadedAt:meta.uploadedAt||'',
+        file: meta.fileName ? {name:meta.fileName} : {name:(meta.projectName||meta.name)+'.xlsx'} };
       CURRENT.cleanBlob=cleanBlob; CURRENT.profitBlob=profitBlob;
       if(folderName) CURRENT.folderName=folderName; // 让后续「下载」复用同一本地子文件夹
       $('dash-frame').srcdoc=await buildDashboardHtml(meta.dashboardData,'mini');
-      $('preview-raw').disabled=true; $('preview-clean').disabled=!cleanBlob; $('preview-profit').disabled=!profitBlob;
+      enableCurrentActions();
       $('result-meta').innerHTML=`本地文件夹：<b>${esc(meta.projectName||meta.name)}</b> ｜ ${meta.uploadedAt||''}`+(meta.summary?` ｜ 有效 ${meta.summary.kept} 行`:'');
       setStatus('已打开本地分析文件夹。');
       return;
@@ -1027,6 +1034,31 @@ async function openFolderItem(dirHandle, folderName){
     }
     alert('该文件夹内未找到可识别的分析数据或源文件。');
   }catch(e){ console.error(e); alert('打开文件夹失败：'+e.message); }
+}
+
+/* 从 _已清洗.xlsx 重新解析出 kept（STD 顺序，金额单位与原 loadRecords 一致），
+   让「本地文件夹」历史数据也能预览/编辑清洗表。
+   CLEAN_HEADER 比 STD 多插入了「码洋价小计/成本小计/利润」三列，需按索引映射回 STD。 */
+const STD_TO_CLEAN_IDX=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
+  25, /*码洋价小计*/ 27, 29,30,31,32,33,34,35,36, /*利润*/ 38];
+async function cleanBlobToKept(blob){
+  const buf=await blob.arrayBuffer();
+  const wb=XLSX.read(new Uint8Array(buf),{type:'array'});
+  const kept=[];
+  for(const sname of wb.SheetNames){
+    const ws=wb.Sheets[sname]; if(!ws) continue;
+    const rows=XLSX.utils.sheet_to_json(ws,{defval:null,raw:false});
+    for(const r of rows){
+      const name=r['商品名称'], type=r['类型'];
+      if(!name || !type) continue;                       // 跳过表头/空行
+      if(String(name).includes('合计')||String(type).includes('合计')) continue; // 跳过合计/动销成本折扣行
+      if(String(name).includes('动销成本折扣')) continue;
+      const rec={};
+      STD.forEach((c,i)=>{ const ci=STD_TO_CLEAN_IDX[i]; rec[c]=(ci!=null && r[CLEAN_HEADER[ci]]!=null)? r[CLEAN_HEADER[ci]]:''; });
+      kept.push(rec);
+    }
+  }
+  return kept;
 }
 
 /* 在工作目录下为每次分析创建独立子文件夹，并写入源文件、清洗表、利润表、看板、data.json */
@@ -1193,7 +1225,7 @@ async function runAnalysis(file, opts={}){
       uploadedAt:new Date().toLocaleString('zh-CN') };
 
     // 预览按钮可用
-    $('preview-raw').disabled=false; $('preview-clean').disabled=false; $('preview-profit').disabled=false;
+    enableCurrentActions();
     $('result-meta').innerHTML=
       `已处理 <b>${rawRows}</b> 行 ｜ 有效 <b>${kept.length}</b> 行（剔除积分=0: ${droppedZero}，无类型: ${droppedNoType}）`+
       (paperZero?' ｜ <b style="color:#e0922c">检测到【全员阅读平台】，纸书项目税率归 0</b>':'')+
@@ -1532,6 +1564,13 @@ function bindDownloads(){
   };
   if($('clear-all')) $('clear-all').onclick=clearAllDS;
   if($('dash-full')) $('dash-full').onclick=toggleFullscreen;
+  // 看板导出 / 复盘报告
+  if($('export-dash')) $('export-dash').onclick=openExportModal;
+  if($('export-xlsx')) $('export-xlsx').onclick=async()=>{ const s=$('export-section').value; await exportDashboard('xlsx', s); };
+  if($('export-docx')) $('export-docx').onclick=async()=>{ const s=$('export-section').value; await exportDashboard('docx', s); };
+  if($('gen-report')) $('gen-report').onclick=generateReport;
+  if($('report-docx')) $('report-docx').onclick=()=>downloadReport('docx');
+  if($('report-xlsx')) $('report-xlsx').onclick=()=>downloadReport('xlsx');
   // 文件选择 / 拖拽：统一走 onFileSelected（自动识别归属）
   $('run-btn').onclick=()=>{ const f=$('file-input').files[0]; if(f) runAnalysis(f); };
   $('file-input').addEventListener('change',e=>{ onFileSelected(e.target.files[0]); });
@@ -1543,6 +1582,233 @@ function bindDownloads(){
   dz.addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f){ $('file-input').files=normalizeFileList(f); onFileSelected(f); } });
 }
 function normalizeFileList(f){ const dt=new DataTransfer(); dt.items.add(f); return dt.files; }
+
+/* ============ 看板导出 / 复盘报告（保留图表） ============ */
+function enableCurrentActions(){
+  if(!CURRENT) return;
+  const hasRaw=!!CURRENT.raw, hasKept=!!(CURRENT.kept&&CURRENT.kept.length),
+        hasStats=!!CURRENT.stats, hasData=!!CURRENT.data;
+  $('preview-raw').disabled=!hasRaw;
+  $('preview-clean').disabled=!hasKept;
+  $('preview-profit').disabled=!hasStats;
+  const gr=$('gen-report'); if(gr) gr.disabled=!hasData;
+}
+function getDashWin(){ const f=$('dash-frame'); try{ return (f&&f.contentWindow)?f.contentWindow:null; }catch(e){ return null; } }
+function getDashDoc(){ const f=$('dash-frame'); try{ return (f&&f.contentDocument)?f.contentDocument:null; }catch(e){ return null; } }
+/* 从 iframe 中用 echarts.getInstanceByDom 取出某区域内所有图表的 PNG（保留图表） */
+function collectSectionCharts(sectionId){
+  const win=getDashWin(), doc=getDashDoc(), imgs=[];
+  if(!win||!doc||!win.echarts) return imgs;
+  let scope = sectionId ? doc.getElementById(sectionId) : doc.querySelector('.wrap');
+  if(!scope) scope = doc.querySelector('.wrap');
+  const charts = scope ? scope.querySelectorAll('.chart') : [];
+  charts.forEach(el=>{
+    try{ const inst=win.echarts.getInstanceByDom(el);
+      if(inst){ const url=inst.getDataURL({pixelRatio:2, backgroundColor:'#ffffff'});
+        imgs.push({w:el.clientWidth||600, h:el.clientHeight||360, url}); } }
+    catch(e){ console.warn('图表导出失败', e); }
+  });
+  return imgs;
+}
+function collectSectionTable(sectionId){
+  const doc=getDashDoc(); if(!doc) return null;
+  const sec = sectionId ? doc.getElementById(sectionId) : null;
+  const tbl = sec ? sec.querySelector('table') : doc.querySelector('table');
+  if(!tbl) return null;
+  const headers=[...tbl.querySelectorAll('thead th')].map(th=>th.textContent.trim());
+  const rows=[...tbl.querySelectorAll('tbody tr')].map(tr=>[...tr.querySelectorAll('td')].map(td=>td.textContent.trim()));
+  return {headers, rows};
+}
+function collectSectionMeta(sectionId){
+  const doc=getDashDoc(); if(!doc||!sectionId) return {title:'',desc:''};
+  const sec=doc.getElementById(sectionId); if(!sec) return {title:'',desc:''};
+  const h2=sec.querySelector('h2'), desc=sec.querySelector('.desc');
+  return {title:h2?h2.textContent.trim():'', desc:desc?desc.textContent.trim():''};
+}
+function collectKpis(){
+  const doc=getDashDoc(), out=[]; if(!doc) return out;
+  doc.querySelectorAll('.kpis .kpi').forEach(el=>{
+    const label=el.querySelector('.label'), val=el.querySelector('.val'), sub=el.querySelector('.sub2');
+    out.push({label:label?label.textContent.trim():'', val:val?val.textContent.trim():'', sub:sub?sub.textContent.trim():''});
+  });
+  return out;
+}
+const rptNum = n=>Number(n==null?0:n).toLocaleString('zh-CN',{maximumFractionDigits:2});
+const rptYuan = n=>{ const v=Number(n==null?0:n); return (v<0?'-¥':'¥')+rptNum(Math.abs(v)); };
+const rptPct = n=>(Number(n==null?0:n)*100).toFixed(1)+'%';
+
+async function exportDashboard(format, sectionId){
+  if(!CURRENT){ alert('请先分析或打开一个数据集'); return; }
+  const doc=getDashDoc();
+  if(!doc){ alert('看板尚未渲染，请稍候再导出'); return; }
+  const sections = sectionId ? [sectionId] : ['sec-kpi','sec-daily','sec-type','sec-neg','sec-risk','sec-top'];
+  setStatus('正在导出看板…');
+  try{
+    if(format==='xlsx'){
+      const wb=new ExcelJS.Workbook(); wb.creator='利润分析';
+      for(const sid of sections){
+        const meta=collectSectionMeta(sid), charts=collectSectionCharts(sid), tbl=collectSectionTable(sid);
+        const ws=wb.addWorksheet((meta.title||sid||'看板').slice(0,31));
+        let r=1;
+        if(sid==='sec-kpi'){
+          ws.getCell(r,1).value='总览 · KPI'; ws.getCell(r,1).font={bold:true,size:14}; r++;
+          collectKpis().forEach(c=>{ ws.getCell(r,1).value=c.label; ws.getCell(r,2).value=c.val; ws.getCell(r,3).value=c.sub||''; r++; });
+          r++; continue;
+        }
+        if(meta.title){ ws.getCell(r,1).value=meta.title; ws.getCell(r,1).font={bold:true,size:14}; r++; }
+        if(meta.desc){ const c=ws.getCell(r,1); c.value=meta.desc; c.font={italic:true,color:{argb:'FF6B7A90'}}; c.alignment={wrapText:true}; r++; }
+        r++;
+        if(tbl && tbl.headers.length){
+          tbl.headers.forEach((h,c)=>{ const cell=ws.getCell(r,c+1); cell.value=h; cell.font={bold:true}; cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFDDEBF7'}}; cell.alignment={horizontal:'center'}; });
+          r++;
+          tbl.rows.forEach(row=>{ row.forEach((v,c)=>{ ws.getCell(r,c+1).value=v; }); r++; });
+          for(let c=1;c<=tbl.headers.length;c++) ws.getColumn(c).width=Math.min(40, Math.max(10, (tbl.headers[c-1]||'').length+6));
+        }
+        r++;
+        for(const img of charts){
+          try{
+            const b64=img.url.split(',')[1];
+            const w=Math.min(880, img.w||600), hgt=Math.round((img.h||360)*(w/(img.w||600)));
+            ws.addImage({base64:b64, extension:'png', tl:{col:0,row:r-1}, br:{col:Math.max(2,Math.round(w/8)),row:r-1+Math.round(hgt/15)+1}});
+            r += Math.round(hgt/15)+3;
+          }catch(e){ console.warn('贴图失败', e); }
+        }
+      }
+      const buf=await wb.xlsx.writeBuffer();
+      downloadBlob(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), safeName((CURRENT.projectName||'看板')+'_看板'+(sectionId?('_'+sectionId):'')+'.xlsx'));
+      setStatus('看板已导出 Excel（保留图表）。');
+    } else {
+      let html='<html><head><meta charset="utf-8"></head><body>';
+      html+='<h1>利润分析看板'+(CURRENT.projectName?(' · '+esc(CURRENT.projectName)):'')+'</h1>';
+      for(const sid of sections){
+        const meta=collectSectionMeta(sid), charts=collectSectionCharts(sid), tbl=collectSectionTable(sid);
+        if(sid==='sec-kpi'){
+          html+='<h2>总览 · KPI</h2><table border="1" cellspacing="0" cellpadding="4"><tbody>';
+          collectKpis().forEach(c=>{ html+='<tr><td><b>'+esc(c.label)+'</b></td><td>'+esc(c.val)+'</td><td>'+esc(c.sub||'')+'</td></tr>'; });
+          html+='</tbody></table>'; continue;
+        }
+        if(meta.title) html+='<h2>'+esc(meta.title)+'</h2>';
+        if(meta.desc) html+='<p>'+esc(meta.desc)+'</p>';
+        for(const img of charts) html+='<p><img src="'+img.url+'" style="width:100%;"/></p>';
+        if(tbl && tbl.headers.length){
+          html+='<table border="1" cellspacing="0" cellpadding="4"><thead><tr>'+tbl.headers.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'+
+            tbl.rows.map(row=>'<tr>'+row.map(v=>'<td>'+esc(v)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+        }
+      }
+      html+='</body></html>';
+      if(typeof htmlDocx==='undefined'){ alert('Word 导出库未加载，请刷新页面后重试'); return; }
+      downloadBlob(htmlDocx.asBlob(html), safeName((CURRENT.projectName||'看板')+'_看板'+(sectionId?('_'+sectionId):'')+'.docx'));
+      setStatus('看板已导出 Word（保留图表）。');
+    }
+  }catch(e){ console.error(e); alert('导出失败：'+e.message); }
+}
+
+/* 复盘报告：基于当前看板数据 + 图表，生成结构化 HTML（参考复盘报告样例版式） */
+async function buildReportHtml(){
+  const d=CURRENT.data, k=d.kpi;
+  let h='';
+  h+='<div class="report-h1">'+esc(CURRENT.projectName||'利润分析')+' · 利润复盘报告</div>';
+  h+='<div class="report-meta">生成时间：'+esc(new Date().toLocaleString('zh-CN'))+(d.generated_at?(' ｜ 看板生成：'+esc(d.generated_at)):'')+' ｜ 数据区间：'+esc(k['数据起期']||'')+' ~ '+esc(k['数据止期']||'')+'（共 '+(k['天数']||'')+' 天）</div>';
+  // 一、概况
+  h+='<div class="report-sec"><h2>一、项目利润概况</h2><table class="report-table"><thead><tr><th>指标</th><th class="num">数值</th><th>说明</th></tr></thead><tbody>';
+  collectKpis().forEach(c=>{ h+='<tr><td>'+esc(c.label)+'</td><td class="num">'+esc(c.val)+'</td><td>'+esc(c.sub||'')+'</td></tr>'; });
+  h+='</tbody></table></div>';
+  // 二、类型维度
+  h+='<div class="report-sec"><h2>二、类型维度利润结构</h2>';
+  (collectSectionCharts('sec-type')||[]).forEach(img=>{ h+='<img src="'+img.url+'"/>'; });
+  const ts=d.type_summary||[];
+  if(ts.length){ h+='<table class="report-table"><thead><tr><th>类型</th><th class="num">兑换单数</th><th class="num">收入(不含税)</th><th class="num">成本(不含税)</th><th class="num">利润(不含税)</th><th class="num">利润率</th></tr></thead><tbody>';
+    ts.forEach(t=>{ h+='<tr><td>'+esc(t.type)+'</td><td class="num">'+rptNum(t.orders)+'</td><td class="num">'+rptYuan(t.revenue)+'</td><td class="num">'+rptYuan(t.cost)+'</td><td class="num">'+rptYuan(t.profit)+'</td><td class="num">'+rptPct(t.margin)+'</td></tr>'; });
+    h+='</tbody></table>'; }
+  h+='</div>';
+  // 三、负利润 TOP20
+  h+='<div class="report-sec"><h2>三、负利润 TOP20 商品</h2>';
+  (collectSectionCharts('sec-neg')||[]).forEach(img=>{ h+='<img src="'+img.url+'"/>'; });
+  const neg=(d.neg_products||[]).slice(0,20);
+  if(neg.length){ h+='<table class="report-table"><thead><tr><th>商品名称</th><th>类型</th><th class="num">单数</th><th class="num">亏损额(元)</th><th class="num">成本率</th><th>主要原因</th></tr></thead><tbody>';
+    neg.forEach(p=>{ h+='<tr><td>'+esc(p.pname)+'</td><td>'+esc(p.type)+'</td><td class="num">'+rptNum(p.orders)+'</td><td class="num">'+rptYuan(p.profit)+'</td><td class="num">'+rptPct(p.cost_rate)+'</td><td>'+esc(p.reason)+'</td></tr>'; });
+    h+='</tbody></table>'; }
+  h+='</div>';
+  // 四、刷单对象
+  h+='<div class="report-sec"><h2>四、刷单对象（黑名单规则）</h2>';
+  (collectSectionCharts('sec-risk')||[]).forEach(img=>{ h+='<img src="'+img.url+'"/>'; });
+  const brush=(d.brush_products||[]);
+  if(brush.length){ h+='<table class="report-table"><thead><tr><th>商品名称</th><th>类型</th><th class="num">购买量</th><th class="num">订单数</th><th class="num">利润(元)</th><th>是否负利润</th></tr></thead><tbody>';
+    brush.forEach(p=>{ h+='<tr><td>'+esc(p.pname)+'</td><td>'+esc(p.type)+'</td><td class="num">'+rptNum(p.qty)+'</td><td class="num">'+rptNum(p.orders)+'</td><td class="num">'+rptYuan(p.profit)+'</td><td>'+(p.neg?'负利润':'盈利')+'</td></tr>'; });
+    h+='</tbody></table>'; }
+  h+='</div>';
+  // 五、利润 TOP20
+  h+='<div class="report-sec"><h2>五、利润 TOP20 商品（不含税口径）</h2>';
+  (collectSectionCharts('sec-top')||[]).forEach(img=>{ h+='<img src="'+img.url+'"/>'; });
+  const top=[...(d.products||[])].sort((a,b)=>b.profit_excl-a.profit_excl).slice(0,20);
+  if(top.length){ h+='<table class="report-table"><thead><tr><th>排名</th><th>商品名称</th><th>类型</th><th class="num">利润(不含税)</th><th class="num">利润率</th></tr></thead><tbody>';
+    top.forEach((p,i)=>{ h+='<tr><td>'+(i+1)+'</td><td>'+esc(p.pname)+'</td><td>'+esc(p.type)+'</td><td class="num">'+rptYuan(p.profit_excl)+'</td><td class="num">'+rptPct(p.margin_excl)+'</td></tr>'; });
+    h+='</tbody></table>'; }
+  h+='</div>';
+  // 六、日均
+  h+='<div class="report-sec"><h2>六、日均利润趋势</h2>';
+  (collectSectionCharts('sec-daily')||[]).forEach(img=>{ h+='<img src="'+img.url+'"/>'; });
+  h+='<div class="report-note">日均利润(不含税)：'+rptYuan(k['日均利润(不含税)'])+' ｜ 数据区间：'+esc(k['数据起期']||'')+' ~ '+esc(k['数据止期']||'')+'（共 '+(k['天数']||'')+' 天）</div>';
+  h+='</div>';
+  return h;
+}
+async function generateReport(){
+  if(!CURRENT||!CURRENT.data){ alert('请先分析或打开一个数据集'); return; }
+  if(!getDashDoc()){ alert('看板尚未渲染，请稍候'); return; }
+  setStatus('正在生成复盘报告…');
+  try{
+    $('report-body').innerHTML=await buildReportHtml();
+    $('report-sub').textContent=(CURRENT.projectName||'')+' ｜ 生成时间 '+new Date().toLocaleString('zh-CN');
+    const o=$('report-overlay'); if(o) o.style.display='flex';
+    setStatus('复盘报告已生成，可预览或下载 Word/Excel。');
+  }catch(e){ console.error(e); alert('生成报告失败：'+e.message); }
+}
+async function downloadReport(format){
+  if(!CURRENT||!CURRENT.data){ alert('请先生成报告'); return; }
+  if(!getDashDoc()){ alert('看板尚未渲染'); return; }
+  try{
+    if(format==='docx'){
+      const html='<html><head><meta charset="utf-8"></head><body>'+await buildReportHtml()+'</body></html>';
+      if(typeof htmlDocx==='undefined'){ alert('Word 导出库未加载，请刷新后重试'); return; }
+      downloadBlob(htmlDocx.asBlob(html), safeName((CURRENT.projectName||'报告')+'_利润复盘报告.docx'));
+    } else {
+      const wb=new ExcelJS.Workbook(); wb.creator='利润分析';
+      const ws=wb.addWorksheet('复盘报告');
+      let r=1;
+      ws.getCell(r,1).value=(CURRENT.projectName||'利润分析')+' · 利润复盘报告'; ws.getCell(r,1).font={bold:true,size:16}; r+=2;
+      ws.getCell(r,1).value='一、项目利润概况'; ws.getCell(r,1).font={bold:true,size:13}; r++;
+      collectKpis().forEach(c=>{ ws.getCell(r,1).value=c.label; ws.getCell(r,2).value=c.val; ws.getCell(r,3).value=c.sub||''; r++; });
+      r++;
+      const sections=[
+        ['二、类型维度利润结构','sec-type', ()=> (CURRENT.data.type_summary||[]).map(t=>[t.type,t.orders,rptYuan(t.revenue),rptYuan(t.cost),rptYuan(t.profit),rptPct(t.margin)]), ['类型','兑换单数','收入(不含税)','成本(不含税)','利润(不含税)','利润率']],
+        ['三、负利润 TOP20 商品','sec-neg', ()=> (CURRENT.data.neg_products||[]).slice(0,20).map(p=>[p.pname,p.type,p.orders,rptYuan(p.profit),rptPct(p.cost_rate),p.reason]), ['商品名称','类型','单数','亏损额(元)','成本率','主要原因']],
+        ['四、刷单对象','sec-risk', ()=> (CURRENT.data.brush_products||[]).map(p=>[p.pname,p.type,p.qty,p.orders,rptYuan(p.profit),(p.neg?'负利润':'盈利')]), ['商品名称','类型','购买量','订单数','利润(元)','是否负利润']],
+        ['五、利润 TOP20 商品','sec-top', ()=> [...(CURRENT.data.products||[])].sort((a,b)=>b.profit_excl-a.profit_excl).slice(0,20).map((p,i)=>[i+1,p.pname,p.type,rptYuan(p.profit_excl),rptPct(p.margin_excl)]), ['排名','商品名称','类型','利润(不含税)','利润率']]
+      ];
+      for(const [title,sid,rowsFn,headers] of sections){
+        ws.getCell(r,1).value=title; ws.getCell(r,1).font={bold:true,size:13}; r++;
+        const rows=rowsFn(); rows.unshift(headers);
+        rows.forEach((row,ri)=>{ row.forEach((v,c)=>{ const cell=ws.getCell(r,c+1); cell.value=v; if(ri===0){ cell.font={bold:true}; cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFDDEBF7'}}; } }); r++; });
+        r++;
+        (collectSectionCharts(sid)||[]).forEach(img=>{
+          try{ const b64=img.url.split(',')[1];
+            const w=Math.min(880,img.w||600), hgt=Math.round((img.h||360)*(w/(img.w||600)));
+            ws.addImage({base64:b64, extension:'png', tl:{col:0,row:r-1}, br:{col:Math.max(2,Math.round(w/8)),row:r-1+Math.round(hgt/15)+1}});
+            r += Math.round(hgt/15)+3;
+          }catch(e){ console.warn('贴图失败', e); }
+        });
+        r++;
+      }
+      for(let c=1;c<=6;c++) ws.getColumn(c).width=18;
+      const buf=await wb.xlsx.writeBuffer();
+      downloadBlob(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), safeName((CURRENT.projectName||'报告')+'_利润复盘报告.xlsx'));
+    }
+    setStatus('复盘报告已导出'+(format==='docx'?' Word':' Excel')+'。');
+  }catch(e){ console.error(e); alert('导出报告失败：'+e.message); }
+}
+function openExportModal(){ const o=$('export-overlay'); if(o) o.style.display='flex'; }
+function closeExportModal(){ const o=$('export-overlay'); if(o) o.style.display='none'; }
+function closeReportModal(){ const o=$('report-overlay'); if(o) o.style.display='none'; }
 
 /* 初始化 */
 async function init(){
