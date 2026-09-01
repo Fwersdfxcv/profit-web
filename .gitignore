@@ -1,3 +1,4 @@
 .workbuddy/
 node_modules/
 *.log
+*.bak

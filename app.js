@@ -499,6 +499,256 @@ async function buildDashboardHtml(data, mode='mini'){
   return html;
 }
 
+/* ---------------- 预览 / 编辑弹窗 ---------------- */
+let PREVIEW_TYPE='';
+let PREVIEW_SCALE=100; // raw/clean 金额按「分」存储，profit 按「元」存储
+function closePreviewModal(){ const o=$('preview-overlay'); if(o) o.style.display='none'; }
+function showPreviewModal(){ const o=$('preview-overlay'); if(o) o.style.display='flex'; }
+function parseRawRecords(buf){ try{ return loadRecords(buf).records; }catch(e){ console.error(e); return null; } }
+function fmtCell(v, col){
+  if(v===null||v===undefined) return '';
+  if(MONEY_HEADERS.has(col)) return (toNum(v)/PREVIEW_SCALE).toFixed(2);
+  if(col==='购买数量' || col==='兑换单数') return String(toInt(v));
+  return String(v);
+}
+function parseCellText(text, col){
+  const s=String(text).trim().replace(/,/g,'').replace(/¥/g,'');
+  if(col==='购买数量' || col==='兑换单数') return toInt(s);
+  if(MONEY_HEADERS.has(col)) return round2(toNum(s)*PREVIEW_SCALE);
+  return s;
+}
+function renderPreviewTable(headers, rows, editableCols, maxRows=5000){
+  const wrap=document.createElement('div');
+  if(rows.length>maxRows){
+    const note=document.createElement('div');
+    note.style.cssText='font-size:12px;color:var(--sub);background:#fff3e0;border:1px dashed #f0d878;border-radius:8px;padding:8px 10px;margin-bottom:10px;';
+    note.textContent='数据共 '+rows.length+' 行，预览仅展示前 '+maxRows+' 行；超出部分请直接「导出」xlsx 后编辑。';
+    wrap.appendChild(note);
+  }
+  const table=document.createElement('table'); table.className='preview-table';
+  const thead=document.createElement('thead');
+  const thr=document.createElement('tr');
+  headers.forEach(h=>{ const th=document.createElement('th'); th.textContent=h; thr.appendChild(th); });
+  thead.appendChild(thr); table.appendChild(thead);
+  const tbody=document.createElement('tbody');
+  const n=Math.min(rows.length, maxRows);
+  for(let i=0;i<n;i++){
+    const row=rows[i];
+    const tr=document.createElement('tr'); tr.dataset.idx=String(i);
+    headers.forEach(h=>{
+      const td=document.createElement('td');
+      const v=(row[h]!==undefined && row[h]!==null)?row[h]:'';
+      td.textContent=fmtCell(v,h);
+      if(editableCols.has(h)){ td.contentEditable='true'; td.dataset.col=h; td.className='num'; }
+      else if(MONEY_HEADERS.has(h) || ['购买数量','兑换单数'].includes(h)) td.className='num';
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody); wrap.appendChild(table);
+  return wrap;
+}
+
+/* 根据当前 CURRENT 重新生成清洗表/利润表/看板 */
+async function rebuildCurrentOutputs(){
+  const groups=groupByType(CURRENT.kept);
+  CURRENT.cleanBlob=await writeCleanXlsx(groups);
+  CURRENT.profitBlob=await writeProfitXlsx(CURRENT.stats, CURRENT.paperZero, TPL_BUF);
+  CURRENT.dashboardHtml=await buildDashboardHtml(CURRENT.data,'full');
+  $('dash-frame').srcdoc=await buildDashboardHtml(CURRENT.data,'mini');
+  $('result-meta').innerHTML=
+    `已处理 <b>${CURRENT.rawRows||CURRENT.kept.length}</b> 行 ｜ 有效 <b>${CURRENT.kept.length}</b> 行`+
+    (CURRENT.paperZero?' ｜ <b style="color:#e0922c">检测到【全员阅读平台】，纸书项目税率归 0</b>':'')+
+    ` ｜ 整体利润率(不含税) <b>${ (CURRENT.data.kpi['整体利润率']*100).toFixed(1) }%</b>`;
+}
+
+/* 从编辑后的原始记录重新跑完整流程 */
+async function recomputeFromRaw(records){
+  if(!records || !records.length) throw new Error('原始记录为空');
+  const {kept}=cleanRecords(records);
+  if(!kept.length) throw new Error('清洗后无有效数据');
+  const groups=groupByType(kept);
+  const paperZero=detectPaperZero(records);
+  const stats={}; for(const t in groups) stats[t]=summarize(groups[t]);
+  const taxInfo=buildTaxInfo(paperZero);
+  const caliber=buildCaliberRows(stats, taxInfo);
+  const data=compute(kept, taxInfo);
+  data.project_name=CURRENT.projectName;
+  data.generated_at=new Date().toLocaleString('zh-CN');
+  data.detail_file=CURRENT.file?CURRENT.file.name:'';
+  data.caliber_file='';
+  data.blacklist_file='内置黑名单（'+BLACKLIST_SET.size+' 个商品id）';
+  data.caliber=caliber; data.tax_info=taxInfo;
+  CURRENT.kept=kept; CURRENT.stats=stats; CURRENT.paperZero=paperZero; CURRENT.data=data;
+  CURRENT.rawRecords=records;
+  await rebuildCurrentOutputs();
+}
+
+/* 从编辑后的已清洗记录重新聚合 */
+async function recomputeFromKept(kept){
+  if(!kept || !kept.length) throw new Error('已清洗记录为空');
+  const groups=groupByType(kept);
+  const stats={}; for(const t in groups) stats[t]=summarize(groups[t]);
+  const taxInfo=buildTaxInfo(CURRENT.paperZero||false);
+  const caliber=buildCaliberRows(stats, taxInfo);
+  const data=compute(kept, taxInfo);
+  data.project_name=CURRENT.projectName;
+  data.generated_at=new Date().toLocaleString('zh-CN');
+  data.detail_file=CURRENT.file?CURRENT.file.name:'';
+  data.caliber_file='';
+  data.blacklist_file='内置黑名单（'+BLACKLIST_SET.size+' 个商品id）';
+  data.caliber=caliber; data.tax_info=taxInfo;
+  CURRENT.kept=kept; CURRENT.stats=stats; CURRENT.data=data;
+  await rebuildCurrentOutputs();
+}
+
+/* 利润表预览：把统计行渲染成可编辑表 */
+function renderProfitPreview(){
+  const headers=['类型','兑换单数','兑换金额含税','成本含税','平均动销成本折扣'];
+  const editable=new Set(['兑换单数','兑换金额含税','成本含税','平均动销成本折扣']);
+  const rows=[];
+  TYPE_ORDER.forEach(t=>{ if(CURRENT.stats[t]) rows.push(Object.assign({类型:t}, CURRENT.stats[t])); });
+  return renderPreviewTable(headers, rows, editable);
+}
+
+/* 从利润表预览收集改动并更新利润表输出 */
+async function applyProfitEdits(){
+  const rows=$('preview-body').querySelectorAll('tbody tr');
+  const stats=Object.assign({}, CURRENT.stats);
+  rows.forEach(tr=>{
+    const type=tr.querySelector('td')? tr.querySelector('td').textContent.trim() : '';
+    if(!type || !stats[type]) return;
+    tr.querySelectorAll('td[contenteditable="true"]').forEach(td=>{
+      const col=td.dataset.col; const val=parseCellText(td.textContent, col);
+      stats[type][col]=val;
+    });
+  });
+  CURRENT.stats=stats;
+  const taxInfo=buildTaxInfo(CURRENT.paperZero||false);
+  CURRENT.data.caliber=buildCaliberRows(stats, taxInfo);
+  CURRENT.profitBlob=await writeProfitXlsx(stats, CURRENT.paperZero, TPL_BUF);
+  $('result-meta').innerHTML=`利润表已手动调整 ｜ 整体利润率(不含税) <b>${ (CURRENT.data.kpi['整体利润率']*100).toFixed(1) }%</b>`;
+}
+
+/* 把浏览器中的某条历史数据集归档到工作目录 */
+async function exportBrowserDsToWorkDir(ds){
+  if(!WORK_DIR_HANDLE){ alert('请先设置工作目录'); return; }
+  if(!ds.kept || !ds.kept.length){ alert('该数据集缺少明细，无法归档'); return; }
+  const groups=groupByType(ds.kept);
+  const cleanBlob=await writeCleanXlsx(groups);
+  const profitBlob=await writeProfitXlsx(ds.stats, ds.paperZero, TPL_BUF);
+  const dashHtml=await buildDashboardHtml(ds.dashboardData,'full');
+  const fileName=ds.fileName || ds.name+'.xlsx';
+  const summary=ds.summary || {rawRows:ds.kept.length, kept:ds.kept.length, droppedZero:0, droppedNoType:0};
+  const prevCurrent=CURRENT;
+  CURRENT={folderName: ds.localFolder || null};
+  let res;
+  try{
+    res=await saveResultsToWorkDir(ds.name, ds.tag||deriveTag(ds.name), {name:fileName}, ds.raw, cleanBlob, profitBlob, dashHtml, ds.dashboardData, ds.stats, ds.paperZero, summary);
+  }finally{ CURRENT=prevCurrent; }
+  if(res.ok && res.folderName){
+    if(ds.id){ try{ await markLocalFolder(ds.id, res.folderName); }catch(_){} }
+    await refreshWorkDir(); await refreshList();
+    setStatus('已保存到工作目录：'+res.folderName);
+  }else{ throw new Error(res.error||'未知错误'); }
+}
+
+/* 删除本地子文件夹或本地文件 */
+async function deleteLocalFolder(folderName, parentHandle){
+  if(!parentHandle) throw new Error('未获取到工作目录句柄');
+  if(!await ensureDirWrite(parentHandle)) throw new Error('未授予写入权限');
+  await parentHandle.removeEntry(folderName,{recursive:true});
+}
+async function deleteLocalFile(fileName, parentHandle){
+  if(!parentHandle) throw new Error('未获取到工作目录句柄');
+  if(!await ensureDirWrite(parentHandle)) throw new Error('未授予写入权限');
+  await parentHandle.removeEntry(fileName);
+}
+
+/* 确认保存当前数据集：浏览器 + 工作目录（若已设置） */
+async function confirmPreviewSave(){
+  const btn=$('preview-confirm'); btn.disabled=true; btn.textContent='保存中…';
+  try{
+    if(PREVIEW_TYPE==='raw'){
+      const records=collectPreviewEdits('raw'); await recomputeFromRaw(records);
+    }else if(PREVIEW_TYPE==='clean'){
+      const kept=collectPreviewEdits('clean'); await recomputeFromKept(kept);
+    }else if(PREVIEW_TYPE==='profit'){
+      await applyProfitEdits();
+    }
+    await persistCurrent();
+    if(WORK_DIR_HANDLE){
+      const res=await saveResultsToWorkDir(
+        CURRENT.projectName, CURRENT.tag, CURRENT.file, CURRENT.raw,
+        CURRENT.cleanBlob, CURRENT.profitBlob, CURRENT.dashboardHtml,
+        CURRENT.data, CURRENT.stats, CURRENT.paperZero,
+        {rawRows:CURRENT.rawRows, kept:CURRENT.kept.length, droppedZero:CURRENT.droppedZero, droppedNoType:CURRENT.droppedNoType}
+      );
+      if(res.ok){
+        CURRENT.folderName=res.folderName;
+        if(CURRENT.savedId){ try{ await markLocalFolder(CURRENT.savedId, res.folderName); }catch(_){} }
+        await refreshWorkDir(); await refreshList();
+        setStatus('已确认保存到浏览器与工作目录【'+WORK_DIR_NAME+' / '+res.folderName+'】。');
+      }else{ throw new Error(res.error||'工作目录写入失败'); }
+    }else{
+      setStatus('已确认保存到浏览器（IndexedDB）。');
+    }
+    closePreviewModal();
+  }catch(e){ console.error(e); alert('保存失败：'+e.message); }
+  finally{ btn.disabled=false; btn.textContent='确认保存'; }
+}
+
+/* 收集弹窗中的编辑结果 */
+function collectPreviewEdits(type){
+  const source = type==='raw' ? (CURRENT.rawRecords||parseRawRecords(CURRENT.raw)||[]) : CURRENT.kept;
+  if(!source || !source.length) throw new Error('没有可编辑的数据');
+  const out=source.map(r=>Object.assign({},r));
+  const rows=$('preview-body').querySelectorAll('tbody tr');
+  rows.forEach(tr=>{
+    const idx=parseInt(tr.dataset.idx||'-1'); if(idx<0 || idx>=out.length) return;
+    tr.querySelectorAll('td[contenteditable="true"]').forEach(td=>{
+      const col=td.dataset.col; if(!col) return;
+      out[idx][col]=parseCellText(td.textContent, col);
+    });
+  });
+  return out;
+}
+
+async function openPreviewRaw(){
+  if(!CURRENT){ alert('请先分析一个文件'); return; }
+  if(!CURRENT.rawRecords){
+    if(!CURRENT.raw){ alert('当前没有原始数据缓存'); return; }
+    CURRENT.rawRecords=parseRawRecords(CURRENT.raw);
+  }
+  if(!CURRENT.rawRecords || !CURRENT.rawRecords.length){ alert('原始数据为空'); return; }
+  PREVIEW_TYPE='raw'; PREVIEW_SCALE=100;
+  $('preview-title').textContent='预览原始数据（可编辑）';
+  $('preview-sub').textContent=CURRENT.projectName+' ｜ '+CURRENT.rawRecords.length+' 行 ｜ 黄色单元格可直接修改';
+  const editable=new Set(['购买数量','码洋价','成本价','销售价','实付单价','实付金额','订单金额','税费','退款数量','退款积分小计','消费积分合计']);
+  $('preview-body').innerHTML='';
+  $('preview-body').appendChild(renderPreviewTable(STD, CURRENT.rawRecords, editable));
+  showPreviewModal();
+}
+async function openPreviewClean(){
+  if(!CURRENT || !CURRENT.kept || !CURRENT.kept.length){ alert('请先分析一个文件'); return; }
+  PREVIEW_TYPE='clean'; PREVIEW_SCALE=100;
+  $('preview-title').textContent='预览清洗后数据（可编辑）';
+  $('preview-sub').textContent=CURRENT.projectName+' ｜ '+CURRENT.kept.length+' 行 ｜ 黄色单元格可直接修改';
+  const editable=new Set(['购买数量','码洋价','成本价','销售价','实付单价','实付金额','订单金额','税费','退款数量','退款积分小计','消费积分合计']);
+  $('preview-body').innerHTML='';
+  $('preview-body').appendChild(renderPreviewTable(CLEAN_HEADER, CURRENT.kept, editable));
+  showPreviewModal();
+}
+async function openPreviewProfit(){
+  if(!CURRENT || !CURRENT.stats){ alert('请先分析一个文件'); return; }
+  PREVIEW_TYPE='profit'; PREVIEW_SCALE=1;
+  $('preview-title').textContent='预览利润表（可编辑）';
+  $('preview-sub').textContent=CURRENT.projectName+' ｜ 修改后将重新生成利润表 xlsx';
+  $('preview-body').innerHTML='';
+  $('preview-body').appendChild(renderProfitPreview());
+  showPreviewModal();
+}
+
 /* ---------------- IndexedDB 本地持久化 ---------------- */
 const DB_NAME='profit-web', STORE='datasets', CFG='config';
 function openDB(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAME,2);
@@ -537,21 +787,9 @@ async function getConfig(key){ const db=await openDB(); return new Promise((res,
 let SAVE_DIR_HANDLE=null, SAVE_DIR_NAME='';
 let WORK_DIR_HANDLE=null, WORK_DIR_NAME='', WORK_DIR_ITEMS=[];
 function hasFSAccess(){ return typeof window.showDirectoryPicker==='function'; }
-async function setSaveDir(){
-  if(!hasFSAccess()){ alert('当前浏览器不支持「选择文件夹」（需 Chrome / Edge 且通过 https 或 localhost 访问）。\n已继续使用浏览器默认下载目录。'); return; }
-  try{
-    const handle=await window.showDirectoryPicker({mode:'readwrite'});
-    SAVE_DIR_HANDLE=handle; SAVE_DIR_NAME=handle.name;
-    try{ await saveConfig('saveDir', handle); }catch(e){ console.warn('保存目录句柄持久化失败（不影响本次使用）', e); }
-    if($('dir-label')) $('dir-label').textContent='📂 '+handle.name;
-    if($('clear-dir')) $('clear-dir').style.display='';
-    setStatus('已设置保存目录：'+handle.name+'（下载将直接写入此文件夹）');
-  }catch(e){ if(e.name!=='AbortError'){ console.error(e); alert('选择目录失败：'+e.message); } }
-}
-async function clearSaveDir(){ SAVE_DIR_HANDLE=null; SAVE_DIR_NAME='';
-  try{ await saveConfig('saveDir', null); }catch(e){}
-  if($('dir-label')) $('dir-label').textContent=''; if($('clear-dir')) $('clear-dir').style.display='none';
-  setStatus('已取消自定义保存目录，下载将使用浏览器默认目录。'); }
+/* 旧「保存目录」入口，现已统一为「工作目录」，避免用户 confusion */
+async function setSaveDir(){ return setWorkDir(); }
+async function clearSaveDir(){ return clearWorkDir(); }
 async function saveBlob(blob, filename){
   if(SAVE_DIR_HANDLE){
     try{ await writeIntoDir(SAVE_DIR_HANDLE, blob, filename); setStatus('已保存到目录【'+SAVE_DIR_NAME+'】→ '+filename); return; }
@@ -631,6 +869,8 @@ async function setWorkDir(){
     SAVE_DIR_HANDLE=handle; SAVE_DIR_NAME=handle.name; // 工作目录同时作为下载目录
     try{ await saveConfig('workDir', handle); }catch(e){ console.warn('工作目录句柄持久化失败', e); }
     renderWorkDir();
+    if($('dir-label')) $('dir-label').textContent='📂 '+handle.name;
+    if($('clear-dir')) $('clear-dir').style.display='';
     setStatus('已设置工作目录：'+handle.name+'，正在扫描…');
     await refreshWorkDir();
     setStatus('已设置工作目录：'+handle.name+'，找到 '+WORK_DIR_ITEMS.filter(i=>i.source==='file').length+' 个 xlsx 文件。');
@@ -638,7 +878,10 @@ async function setWorkDir(){
 }
 async function clearWorkDir(){ WORK_DIR_HANDLE=null; WORK_DIR_NAME=''; WORK_DIR_ITEMS=[]; SAVE_DIR_HANDLE=null; SAVE_DIR_NAME='';
   try{ await saveConfig('workDir', null); }catch(e){}
-  renderWorkDir(); await refreshList(); setStatus('已取消工作目录。'); }
+  renderWorkDir(); await refreshList();
+  if($('dir-label')) $('dir-label').textContent='';
+  if($('clear-dir')) $('clear-dir').style.display='none';
+  setStatus('已取消工作目录。'); }
 function renderWorkDir(){
   const box=$('dir-box');
   if(!WORK_DIR_HANDLE){ box.innerHTML='<div class="empty">未设置工作目录<br>分析结果将只保存在浏览器内</div><button id="set-workdir" class="btn small ghost" style="width:100%;margin-top:8px;">设置工作目录</button>'; }
@@ -769,7 +1012,7 @@ async function openFolderItem(dirHandle, folderName){
       CURRENT.cleanBlob=cleanBlob; CURRENT.profitBlob=profitBlob;
       if(folderName) CURRENT.folderName=folderName; // 让后续「下载」复用同一本地子文件夹
       $('dash-frame').srcdoc=await buildDashboardHtml(meta.dashboardData,'mini');
-      $('dl-clean').disabled=!cleanBlob; $('dl-profit').disabled=!profitBlob; $('dl-dash').disabled=!dashHtml;
+      $('preview-raw').disabled=true; $('preview-clean').disabled=!cleanBlob; $('preview-profit').disabled=!profitBlob;
       $('result-meta').innerHTML=`本地文件夹：<b>${esc(meta.projectName||meta.name)}</b> ｜ ${meta.uploadedAt||''}`+(meta.summary?` ｜ 有效 ${meta.summary.kept} 行`:'');
       setStatus('已打开本地分析文件夹。');
       return;
@@ -790,9 +1033,13 @@ async function openFolderItem(dirHandle, folderName){
 async function saveResultsToWorkDir(projectName, tag, file, rawBuf, cleanBlob, profitBlob, dashHtml, data, stats, paperZero, summary){
   if(!WORK_DIR_HANDLE) return {ok:false, error:'未设置工作目录'};
   try{
-    const shortId=guid().slice(0,12);
     const base=safeName(projectName);
-    const folderName=shortId+'__'+base;
+    let folderName = (CURRENT && CURRENT.folderName) || null;
+    if(!folderName){
+      const shortId=guid().slice(0,12);
+      folderName=shortId+'__'+base;
+    }
+    if(CURRENT) CURRENT.folderName = folderName;
     const dirHandle=await WORK_DIR_HANDLE.getDirectoryHandle(folderName,{create:true});
     const fileStem=String(file.name||'').replace(/\.xlsx?$/i,'');
 
@@ -940,38 +1187,21 @@ async function runAnalysis(file, opts={}){
     $('dash-frame').srcdoc=htmlMini;
 
     // 保存当前结果，供下载 / 持久化
-    CURRENT={ projectName, tag, file, raw:buf, kept, stats, paperZero,
+    CURRENT={ projectName, tag, file, raw:buf, rawRecords:records, kept, stats, paperZero,
       cleanBlob, profitBlob, dashboardHtml:htmlFull, data,
       droppedZero, droppedNoType, rawRows,
       uploadedAt:new Date().toLocaleString('zh-CN') };
 
-    // 下载按钮可用
-    $('dl-clean').disabled=false; $('dl-profit').disabled=false; $('dl-dash').disabled=false;
+    // 预览按钮可用
+    $('preview-raw').disabled=false; $('preview-clean').disabled=false; $('preview-profit').disabled=false;
     $('result-meta').innerHTML=
       `已处理 <b>${rawRows}</b> 行 ｜ 有效 <b>${kept.length}</b> 行（剔除积分=0: ${droppedZero}，无类型: ${droppedNoType}）`+
       (paperZero?' ｜ <b style="color:#e0922c">检测到【全员阅读平台】，纸书项目税率归 0</b>':'')+
       ` ｜ 整体利润率(不含税) <b>${ (data.kpi['整体利润率']*100).toFixed(1) }%</b>`;
     setProgress(100,'完成');
-    setStatus('完成。可下载清洗表 / 利润表 / 看板，或点「保存到本机」留以后查看。');
-    // 自动归档到 IndexedDB，刷新网页后仍可在左侧「历史数据集」找回
+    setStatus('完成。可点击上方「预览」查看/修改数据并确认保存。');
+    // 自动归档到浏览器 IndexedDB，刷新网页后仍可在左侧「历史数据集」找回；工作目录需要用户手动点「保存至工作目录」
     try{ await persistCurrent(); }catch(e){ console.warn('自动保存失败', e); }
-    // 若设置了工作目录，在目录下新建子文件夹归档
-    if(WORK_DIR_HANDLE){
-      try{
-        const res=await saveResultsToWorkDir(
-          CURRENT.projectName, CURRENT.tag, CURRENT.file, CURRENT.raw,
-          CURRENT.cleanBlob, CURRENT.profitBlob, CURRENT.dashboardHtml,
-          CURRENT.data, CURRENT.stats, CURRENT.paperZero,
-          {rawRows:CURRENT.rawRows, kept:CURRENT.kept.length, droppedZero:CURRENT.droppedZero, droppedNoType:CURRENT.droppedNoType}
-        );
-        if(res.ok){
-          CURRENT.folderName = res.folderName;
-          try{ await markLocalFolder(CURRENT.savedId, res.folderName); }catch(_){}
-          setStatus('已保存到工作目录【'+WORK_DIR_NAME+' / '+res.folderName+'】并归档到浏览器。');
-          await refreshWorkDir();
-        }
-      }catch(e){ console.warn('写入工作目录失败', e); }
-    }
   }catch(e){
     console.error(e); setStatus('出错：'+e.message); alert('处理失败：'+e.message);
   }finally{
@@ -996,10 +1226,16 @@ async function persistCurrent(){
     raw:CURRENT.raw, kept:CURRENT.kept, stats:CURRENT.stats, paperZero:CURRENT.paperZero,
     tag:CURRENT.tag, dashboardData:CURRENT.data,
     summary:{rawRows:CURRENT.rawRows, kept:CURRENT.kept.length, droppedZero:CURRENT.droppedZero, droppedNoType:CURRENT.droppedNoType} };
-  await saveDS(ds);
-  CURRENT.savedId = id;
-  await refreshList();
-  setStatus('已保存到本机浏览器（IndexedDB）'+(geo.province||geo.city||geo.town?(' ｜ 归属：'+(geo.province||'-')+'/'+(geo.city||'-')+'/'+(geo.town||'-')):'')+'，可在左侧「历史数据集」再次打开。');
+  try{
+    await saveDS(ds);
+    CURRENT.savedId = id;
+    await refreshList();
+    setStatus('已保存到本机浏览器（IndexedDB）'+(geo.province||geo.city||geo.town?(' ｜ 归属：'+(geo.province||'-')+'/'+(geo.city||'-')+'/'+(geo.town||'-')):'')+'，可在左侧「历史数据集」再次打开。');
+  }catch(e){
+    console.error('保存到 IndexedDB 失败', e);
+    setStatus('保存失败：'+e.message);
+    throw e;
+  }
 }
 
 /* 确保数据集有 geo；老的/空的会自动用文件名识别并写回 IndexedDB */
@@ -1062,11 +1298,15 @@ async function refreshList(){
   // 按时间倒序
   items.sort((a,b)=> (b.time||'').localeCompare(a.time||''));
 
+  // 模糊搜索过滤
+  const q=($('ds-search')?$('ds-search').value:'').trim().toLowerCase();
+  if(q) items=items.filter(it=>(it.displayName||'').toLowerCase().includes(q)||(it.sub||'').toLowerCase().includes(q));
+
   const box=$('ds-list'); box.innerHTML='';
-  // 来源图例：让用户理解「仅浏览器 / 本地文件夹 / 本地+浏览器」
+  // 来源图例
   const legend=document.createElement('div');
   legend.style.cssText='font-size:11.5px;color:var(--sub);background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;line-height:1.6;';
-  legend.innerHTML='💡 <b>数据来源</b>：💾仅浏览器=只存浏览器本地库(IndexedDB)；📁本地文件夹=只存工作目录；🔗本地+浏览器=两处都有（删任一处不影响另一处）。未设工作目录时全部为「仅浏览器」。';
+  legend.innerHTML='💡 <b>数据来源</b>：💾仅浏览器=只存浏览器本地库(IndexedDB)；📁本地文件夹=只存工作目录；🔗本地+浏览器=两处都有。可分别删除浏览器或本地。';
   box.append(legend);
 
   if(!items.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='暂无数据集'; box.append(e); return; }
@@ -1093,35 +1333,38 @@ async function refreshList(){
           rename.onclick=()=>toggleNameEditor(item.ds);
           acts.append(rename);
         }
-        const delBtn=document.createElement('button'); delBtn.className='btn small danger'; delBtn.textContent=item.dual?'删除(两处)':'删除';
-        delBtn.onclick=async()=>{
-          const msg = item.dual ? '确认同时删除本地文件夹与该数据集（浏览器）？此操作不可恢复。' : '确认删除该分析文件夹及其内所有文件？此操作不可恢复。';
-          if(confirm(msg)){
-            try{
-              const dh=item.parentHandle;
-              if(!dh) throw new Error('未获取到工作目录句柄');
-              if(!await ensureDirWrite(dh)) throw new Error('未授予写入权限，无法删除（可在弹窗中点击「允许」后重试）');
-              if(item.folderName){ await dh.removeEntry(item.folderName,{recursive:true}); }
-              if(item.dual && item.ds){ await delDS(item.ds.id); }
-              await refreshWorkDir(); setStatus('已删除：'+item.folderName);
-            }catch(e){ console.error(e); alert('删除失败：'+e.message); }
-          }
+        // 删除（本地）
+        const delLocal=document.createElement('button'); delLocal.className='btn small danger'; delLocal.textContent='删除(本地)';
+        delLocal.onclick=async()=>{
+          if(!confirm('确认删除本地文件夹「'+item.folderName+'」及其内所有文件？此操作不可恢复。')) return;
+          try{
+            await deleteLocalFolder(item.folderName, item.parentHandle);
+            if(item.dual && item.ds){ // 仅清除本地标记，保留浏览器记录
+              item.ds.localFolder=null; await saveDS(item.ds);
+            }
+            await refreshWorkDir(); setStatus('已删除本地文件夹：'+item.folderName);
+          }catch(e){ console.error(e); alert('删除本地失败：'+e.message); }
         };
-        acts.append(delBtn);
+        acts.append(delLocal);
+        // 若同时有浏览器备份，提供删除浏览器
+        if(item.dual && item.ds){
+          const delBrowser=document.createElement('button'); delBrowser.className='btn small danger'; delBrowser.textContent='删除(浏览器)';
+          delBrowser.onclick=async()=>{
+            if(!confirm('确认删除该数据集在浏览器中的备份？本地文件夹仍会保留。')) return;
+            try{ await delDS(item.ds.id); await refreshList(); setStatus('已删除浏览器备份'); }
+            catch(e){ console.error(e); alert('删除浏览器备份失败：'+e.message); }
+          };
+          acts.append(delBrowser);
+        }
       }else if(item.source==='file'){
         const analyze=document.createElement('button'); analyze.className='btn small primary'; analyze.textContent='分析';
         analyze.onclick=()=>analyzeFileHandle(item.handle);
         acts.append(analyze);
-        const delBtn=document.createElement('button'); delBtn.className='btn small danger'; delBtn.textContent='删除';
+        const delBtn=document.createElement('button'); delBtn.className='btn small danger'; delBtn.textContent='删除(本地)';
         delBtn.onclick=async()=>{
           if(!confirm('确认从工作目录删除文件「'+item.fileName+'」？此操作不可恢复。')) return;
-          try{
-            const dh=item.parentHandle;
-            if(!dh) throw new Error('未获取到工作目录句柄');
-            if(!await ensureDirWrite(dh)) throw new Error('未授予写入权限，无法删除（可在弹窗中点击「允许」后重试）');
-            await dh.removeEntry(item.fileName);
-            await refreshWorkDir(); setStatus('已删除文件：'+item.fileName);
-          }catch(e){ console.error(e); alert('删除文件失败：'+e.message); }
+          try{ await deleteLocalFile(item.fileName, item.parentHandle); await refreshWorkDir(); setStatus('已删除文件：'+item.fileName); }
+          catch(e){ console.error(e); alert('删除文件失败：'+e.message); }
         };
         acts.append(delBtn);
         if(!item.isSource){
@@ -1133,9 +1376,35 @@ async function refreshList(){
         open.onclick=()=>openDS(item.id);
         const rename=document.createElement('button'); rename.className='btn small ghost'; rename.textContent='改名';
         rename.onclick=()=>toggleNameEditor(item.ds);
-        const del=document.createElement('button'); del.className='btn small danger'; del.textContent='删除';
-        del.onclick=async()=>{ if(confirm('确认删除该数据集？')){ try{ await delDS(item.id); await refreshList(); }catch(e){ console.error(e); alert('单条删除失败：'+e.message+'（可改用左上「清空全部」）。'); } } };
-        acts.append(open,rename,del);
+        acts.append(open,rename);
+        // 单独保存至工作目录
+        if(WORK_DIR_HANDLE){
+          const saveLocal=document.createElement('button'); saveLocal.className='btn small primary'; saveLocal.textContent='保存至工作目录';
+          saveLocal.onclick=async()=>{
+            saveLocal.disabled=true; saveLocal.textContent='保存中…';
+            try{ await exportBrowserDsToWorkDir(item.ds); }
+            catch(e){ console.error(e); alert('保存失败：'+e.message); }
+            finally{ saveLocal.disabled=false; saveLocal.textContent='保存至工作目录'; }
+          };
+          acts.append(saveLocal);
+        }
+        // 删除（浏览器）
+        const delBrowser=document.createElement('button'); delBrowser.className='btn small danger'; delBrowser.textContent='删除(浏览器)';
+        delBrowser.onclick=async()=>{ if(confirm('确认删除该数据集？')){ try{ await delDS(item.id); await refreshList(); setStatus('已删除浏览器备份'); }catch(e){ console.error(e); alert('删除失败：'+e.message+'（可改用左上「清空全部」）。'); } } };
+        acts.append(delBrowser);
+        // 若还有本地残留标记，也提供删除本地
+        if(item.ds && item.ds.localFolder){
+          const delLocal=document.createElement('button'); delLocal.className='btn small danger'; delLocal.textContent='删除(本地)';
+          delLocal.onclick=async()=>{
+            if(!confirm('确认删除该数据集对应的本地文件夹？')) return;
+            try{
+              await deleteLocalFolder(item.ds.localFolder, WORK_DIR_HANDLE);
+              item.ds.localFolder=null; await saveDS(item.ds);
+              await refreshWorkDir(); await refreshList(); setStatus('已删除本地残留文件夹');
+            }catch(e){ console.error(e); alert('删除本地失败：'+e.message); }
+          };
+          acts.append(delLocal);
+        }
       }
       el.append(acts);
     }catch(e){ console.warn('渲染单项失败', e, item); el=document.createElement('div'); el.className='ds-item';
@@ -1215,27 +1484,52 @@ async function openDS(id){
   CURRENT.profitBlob=await writeProfitXlsx(ds.stats, ds.paperZero, TPL_BUF);
   CURRENT.dashboardHtml=await buildDashboardHtml(ds.dashboardData,'full');
   $('dash-frame').srcdoc=await buildDashboardHtml(ds.dashboardData,'mini');
-  $('dl-clean').disabled=false; $('dl-profit').disabled=false; $('dl-dash').disabled=false;
+  $('preview-raw').disabled=false; $('preview-clean').disabled=false; $('preview-profit').disabled=false;
   $('result-meta').innerHTML=`历史数据集：<b>${esc(ds.name)}</b> ｜ ${ds.summary?('有效 '+ds.summary.kept+' 行'):''}`;
   setStatus('已打开历史数据集。');
 }
 
-/* 下载按钮 */
+/* 预览/导出按钮与交互绑定 */
 function bindDownloads(){
-  // 三个下载：写入工作目录下的子文件夹（与自动归档同一处）；未设工作目录则提示并退回默认下载
-  const dl = async (btn, blob, filename)=>{
+  $('preview-raw').onclick=openPreviewRaw;
+  $('preview-clean').onclick=openPreviewClean;
+  $('preview-profit').onclick=openPreviewProfit;
+  $('preview-confirm').onclick=confirmPreviewSave;
+  $('preview-export').onclick=async()=>{
     if(!CURRENT) return;
-    btn.disabled=true;
-    try{ await saveBlobToWorkDir(blob, filename); }
-    catch(e){ console.error(e); alert('保存失败：'+e.message); }
-    finally{ btn.disabled=false; }
+    try{
+      if(PREVIEW_TYPE==='raw'){
+        const recs=CURRENT.rawRecords||parseRawRecords(CURRENT.raw); if(!recs) throw new Error('无原始数据');
+        const ws=XLSX.utils.json_to_sheet(recs, {header:STD});
+        const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'原始数据');
+        const buf=await XLSX.write(wb,{bookType:'xlsx',type:'array'});
+        downloadBlob(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), safeName((CURRENT.projectName||'原始')+'_原始数据.xlsx'));
+      }else if(PREVIEW_TYPE==='clean'){
+        downloadBlob(CURRENT.cleanBlob, safeName((CURRENT.projectName||'清洗')+'_已清洗.xlsx'));
+      }else if(PREVIEW_TYPE==='profit'){
+        downloadBlob(CURRENT.profitBlob, safeName('项目数据统计口径参考_'+(CURRENT.tag||'')+'.xlsx'));
+      }else{ alert('请先打开一个预览'); }
+    }catch(e){ console.error(e); alert('导出失败：'+e.message); }
   };
-  $('dl-clean').onclick=()=> dl($('dl-clean'), CURRENT.cleanBlob, safeName((CURRENT.projectName||'清洗')+'_已清洗.xlsx'));
-  $('dl-profit').onclick=()=> dl($('dl-profit'), CURRENT.profitBlob, safeName('项目数据统计口径参考_'+(CURRENT.tag||'')+'.xlsx'));
-  $('dl-dash').onclick=()=> dl($('dl-dash'), new Blob([CURRENT.dashboardHtml||''],{type:'text/html'}), safeName((CURRENT.projectName||'看板')+'_看板.html'));
-  $('save-btn').onclick=persistCurrent;
-  if($('set-dir')) $('set-dir').onclick=setSaveDir;
-  if($('clear-dir')) $('clear-dir').onclick=clearSaveDir;
+  // 左侧模糊搜索
+  const searchInput=$('ds-search');
+  if(searchInput) searchInput.addEventListener('input', ()=>{ refreshList(); });
+  // 统一保存至工作目录
+  const saveAllBtn=$('save-all-workdir');
+  if(saveAllBtn) saveAllBtn.onclick=async()=>{
+    if(!WORK_DIR_HANDLE){ alert('请先设置工作目录'); return; }
+    const all=await listDS();
+    // 只保存「仅浏览器」的数据集；双份或本地已有的跳过
+    const targets=all.filter(ds=>!ds.localFolder);
+    if(!targets.length){ alert('当前没有仅浏览器的数据集需要归档'); return; }
+    if(!confirm('确认将 '+targets.length+' 条仅浏览器的数据集统一保存到工作目录？')) return;
+    let ok=0, fail=0;
+    for(const ds of targets){
+      try{ await exportBrowserDsToWorkDir(ds); ok++; }
+      catch(e){ console.error(e); fail++; }
+    }
+    setStatus('统一保存完成：成功 '+ok+' 条，失败 '+fail+' 条');
+  };
   if($('clear-all')) $('clear-all').onclick=clearAllDS;
   if($('dash-full')) $('dash-full').onclick=toggleFullscreen;
   // 文件选择 / 拖拽：统一走 onFileSelected（自动识别归属）
@@ -1269,6 +1563,8 @@ async function init(){
       WORK_DIR_HANDLE=h; WORK_DIR_NAME=h.name;
       SAVE_DIR_HANDLE=h; SAVE_DIR_NAME=h.name;
       renderWorkDir();
+      if($('dir-label')) $('dir-label').textContent='📂 '+h.name;
+      if($('clear-dir')) $('clear-dir').style.display='';
       // 尝试请求权限并扫描
       try{
         const perm=await h.requestPermission({mode:'readwrite'});

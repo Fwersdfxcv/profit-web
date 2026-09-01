@@ -76,6 +76,21 @@
   .progress{position:relative;height:22px;background:#eef2f8;border-radius:6px;overflow:hidden;margin-top:12px;}
   .progress-fill{position:absolute;left:0;top:0;height:100%;width:0;background:linear-gradient(90deg,#3b6fe0,#6f9bff);transition:width .2s;}
   .progress-text{position:absolute;left:10px;top:0;line-height:22px;font-size:12px;color:#2b3a52;font-weight:600;}
+  /* 预览弹窗 */
+  #preview-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center;padding:20px;}
+  #preview-card{background:#fff;width:100%;max-width:95vw;height:90vh;border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.25);}
+  #preview-head{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
+  #preview-head h3{margin:0;font-size:16px;}
+  #preview-sub{font-size:12px;color:var(--sub);margin-top:4px;}
+  #preview-body{flex:1;overflow:auto;padding:12px;background:#fbfcfe;}
+  #preview-foot{padding:10px 18px;border-top:1px solid var(--line);font-size:12px;color:var(--sub);background:#fff;}
+  .preview-table{width:100%;border-collapse:collapse;font-size:12px;background:#fff;}
+  .preview-table th{background:#eef2fb;position:sticky;top:0;padding:8px 10px;text-align:left;font-weight:600;color:var(--sub);border-bottom:1px solid var(--line);white-space:nowrap;}
+  .preview-table td{padding:5px 10px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle;}
+  .preview-table td.num{text-align:right;font-variant-numeric:tabular-nums;}
+  .preview-table td[contenteditable="true"]{background:#fffbe6;outline:none;box-shadow:inset 0 0 0 1px #f0d878;cursor:text;}
+  .preview-table td[contenteditable="true"]:focus{background:#fff4cc;}
+  .preview-table tr:hover td{background:#f8fafc;}
 </style>
 </head>
 <body>
@@ -94,6 +109,10 @@
     </div>
 
     <h2 style="margin-top:16px;justify-content:space-between;">📊 数据集<button id="clear-all" class="btn small danger" style="padding:3px 10px;font-size:11px;font-weight:600;">清空全部</button></h2>
+    <div id="ds-search-box" style="margin:10px 0;">
+      <input id="ds-search" type="text" placeholder="搜索数据集…" style="width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;">
+      <button id="save-all-workdir" class="btn small primary" style="width:100%;margin-top:8px;">统一保存至工作目录</button>
+    </div>
     <div id="ds-list"><div class="empty">暂无数据集</div></div>
   </aside>
 
@@ -129,18 +148,12 @@
 
     <section class="panel">
       <div class="actions">
-        <button id="dl-clean" class="btn primary" disabled>⬇ 下载清洗表（含公式）</button>
-        <button id="dl-profit" class="btn primary" disabled>⬇ 下载利润表（含公式）</button>
-        <button id="dl-dash" class="btn ghost" disabled>看板网页</button>
-        <button id="save-btn" class="btn ghost">保存到本机</button>
-      </div>
-      <div class="actions" style="margin-top:10px;">
-        <button id="set-dir" class="btn small ghost">📂 设置保存目录</button>
-        <button id="clear-dir" class="btn small danger" style="display:none;">取消目录</button>
-        <span id="dir-label" style="font-size:12px;color:var(--sub);"></span>
+        <button id="preview-raw" class="btn primary" disabled>预览原始数据</button>
+        <button id="preview-clean" class="btn primary" disabled>预览清洗后数据</button>
+        <button id="preview-profit" class="btn primary" disabled>预览利润表</button>
       </div>
       <div style="font-size:12px;color:var(--sub);margin-top:10px;">
-        主按钮为下载结果；「保存到本机」将本次数据集存入浏览器 IndexedDB，下次无需重新上传即可查看。<b>设置「工作目录」后，下载与自动归档都会写入同一个 <code>{编号}__{名称}</code> 子文件夹</b>（需 Chrome/Edge + https/localhost）。左侧每条数据都标注了来源（💾仅浏览器 / 📁本地文件夹 / 🔗本地+浏览器），便于区分。
+        <b>预览说明</b>：在弹窗中查看并修改数据，点击「确认保存」后同步写入浏览器 IndexedDB；若已设置「工作目录」，还会归档到 <code>{编号}__{名称}</code> 子文件夹。点击「导出」可单独下载当前表格/看板文件。
       </div>
     </section>
 
@@ -153,6 +166,25 @@
 
     <div class="foot">纯前端部署 · 可托管于腾讯云 EdgeOne Pages / COS 静态网站（免费） · 多人共用、无需登录</div>
   </main>
+</div>
+
+<!-- 预览/编辑弹窗 -->
+<div id="preview-overlay" onclick="if(event.target.id==='preview-overlay') closePreviewModal()">
+  <div id="preview-card">
+    <div id="preview-head">
+      <div>
+        <h3 id="preview-title">数据预览</h3>
+        <div id="preview-sub"></div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button id="preview-export" class="btn small ghost">导出</button>
+        <button id="preview-confirm" class="btn small primary">确认保存</button>
+        <button id="preview-close" class="btn small ghost" onclick="closePreviewModal()">关闭</button>
+      </div>
+    </div>
+    <div id="preview-body"></div>
+    <div id="preview-foot">可直接点击单元格修改；黄色单元格为可编辑。确认后同步保存到浏览器与工作目录。</div>
+  </div>
 </div>
 
 <!-- 依赖加载顺序：解析 → 写出 → 黑名单 → 内嵌模板/看板/ECharts → 主逻辑 -->
