@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>利润分析 · 纯前端版（数据不出本机）</title>
+<style>
+  :root{
+    --bg:#f4f6fa; --card:#ffffff; --ink:#1f2d3d; --sub:#6b7a90; --line:#e6ebf2;
+    --blue:#3b6fe0; --blue-d:#2b56b8; --amber:#e0922c; --red:#e2444a; --green:#1f9d5b;
+    --blue-soft:#eaf0fd;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.5;}
+  header{background:linear-gradient(135deg,#27407a,#3b6fe0);color:#fff;padding:16px 24px;
+    display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+  header h1{margin:0;font-size:19px;font-weight:700;}
+  header .tip{font-size:12.5px;opacity:.92;}
+  .wrap{display:flex;gap:16px;padding:16px;align-items:flex-start;}
+  .side{width:260px;flex:0 0 260px;background:var(--card);border:1px solid var(--line);
+    border-radius:10px;padding:14px;}
+  .side h2{margin:0 0 10px;font-size:14px;color:var(--sub);font-weight:600;
+    display:flex;align-items:center;gap:6px;}
+  .ds-item{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;
+    display:flex;flex-direction:column;gap:6px;}
+  .ds-name{font-weight:600;font-size:13.5px;word-break:break-all;}
+  .ds-sub{font-size:11.5px;color:var(--sub);}
+  .ds-acts{display:flex;gap:6px;}
+  .empty{font-size:12.5px;color:var(--sub);text-align:center;padding:12px 0;}
+  .main{flex:1;min-width:0;display:flex;flex-direction:column;gap:14px;}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;}
+  .drop{border:2px dashed #c2cfe6;border-radius:10px;padding:24px;text-align:center;
+    background:#fbfcfe;transition:.15s;cursor:pointer;}
+  .drop.over{border-color:var(--blue);background:var(--blue-soft);}
+  .drop .big{font-size:15px;font-weight:600;}
+  .drop .small{font-size:12.5px;color:var(--sub);margin-top:4px;}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;}
+  .btn{font-family:inherit;border:none;border-radius:8px;cursor:pointer;font-size:14px;
+    padding:11px 20px;font-weight:600;transition:.12s;}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+  .btn.primary{background:var(--blue);color:#fff;font-size:15px;padding:12px 28px;}
+  .btn.primary:hover:not(:disabled){background:var(--blue-d);}
+  .btn.ghost{background:var(--blue-soft);color:var(--blue);}
+  .btn.ghost:hover:not(:disabled){background:#dde7fb;}
+  .btn.small{font-size:12px;padding:5px 12px;font-weight:500;border-radius:6px;}
+  .btn.small.primary{background:var(--blue);color:#fff;}
+  .btn.small.primary:hover:not(:disabled){background:var(--blue-d);}
+  .btn.danger{background:#fdecec;color:var(--red);}
+  .btn.danger:hover{background:#f9d6d6;}
+  .dir-info{font-size:12.5px;color:var(--ink);word-break:break-all;margin-bottom:6px;}
+  .dir-actions{display:flex;gap:6px;flex-wrap:wrap;}
+  /* 按钮层级：主操作(运行/下载)更大，次操作(保存)更轻，危险操作(删除)最小 */
+  .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+  .status{font-size:13px;color:var(--sub);min-height:20px;margin-top:12px;}
+  .result-meta{font-size:13.5px;color:var(--ink);background:#f8fafc;border:1px solid var(--line);
+    border-radius:8px;padding:10px 12px;display:none;margin-top:12px;}
+  .result-meta.show{display:block;}
+  .dash-card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;}
+  .dash-card .dh{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;
+    border-bottom:1px solid var(--line);}
+  .dash-card .dh h2{margin:0;font-size:15px;}
+  iframe#dash-frame{width:100%;height:720px;border:none;display:block;background:#fff;}
+  .foot{font-size:12px;color:var(--sub);text-align:center;padding:8px 16px 20px;}
+  a{color:var(--blue);}
+  /* 筛选 / 归属编辑 */
+  .filter-box{margin-bottom:10px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fbfcfe;}
+  .filter-box .filter-title{font-size:12px;color:var(--sub);margin-bottom:6px;}
+  .filter-box select{width:100%;margin-bottom:6px;padding:6px;border:1px solid var(--line);border-radius:6px;font-family:inherit;font-size:12.5px;background:#fff;}
+  .geo-edit{font-size:13px;color:var(--sub);margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .geo-edit select,.geo-edit input{padding:5px 7px;border:1px solid var(--line);border-radius:6px;font-family:inherit;font-size:12.5px;background:#fff;}
+  .geo-edit select{min-width:92px;}
+  .geo-hint{font-size:11.5px;color:var(--sub);}
+  /* 分析进度条 */
+  .progress{position:relative;height:22px;background:#eef2f8;border-radius:6px;overflow:hidden;margin-top:12px;}
+  .progress-fill{position:absolute;left:0;top:0;height:100%;width:0;background:linear-gradient(90deg,#3b6fe0,#6f9bff);transition:width .2s;}
+  .progress-text{position:absolute;left:10px;top:0;line-height:22px;font-size:12px;color:#2b3a52;font-weight:600;}
+</style>
+</head>
+<body>
+<header>
+  <h1>利润分析管理软件 · 纯前端版</h1>
+  <div class="tip">数据仅在你的浏览器内处理 · 不会上传服务器 · 可保存到本机随时查看</div>
+</header>
+
+<div class="wrap">
+  <!-- 左侧：工作目录 + 数据集 -->
+  <aside class="side">
+    <h2>📂 工作目录</h2>
+    <div id="dir-box">
+      <div class="empty">未设置工作目录<br>分析结果将只保存在浏览器内</div>
+      <button id="set-workdir" class="btn small ghost" style="width:100%;margin-top:8px;">设置工作目录</button>
+    </div>
+
+    <h2 style="margin-top:16px;justify-content:space-between;">📊 数据集<button id="clear-all" class="btn small danger" style="padding:3px 10px;font-size:11px;font-weight:600;">清空全部</button></h2>
+    <div id="ds-list"><div class="empty">暂无数据集</div></div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <section class="panel">
+      <div id="drop" class="drop" onclick="document.getElementById('file-input').click()">
+        <div class="big">拖入「商品兑换明细」Excel，或点击选择文件</div>
+        <div class="small">支持 .xlsx / .xls · 含列：类型 / 消费积分合计 / 购买数量 / 码洋价 / 成本价</div>
+      </div>
+      <input id="file-input" type="file" accept=".xlsx,.xls" style="display:none" />
+      <div class="row">
+        <span id="sel-name" style="font-size:13px;color:var(--sub);"></span>
+        <button id="run-btn" class="btn primary" disabled>开始分析</button>
+      </div>
+      <div id="geo-edit" class="geo-edit" style="display:none;">
+        <span>识别归属：</span>
+        <input id="g-prov" list="list-prov" placeholder="省份" style="width:96px" />
+        <input id="g-city" list="list-city" placeholder="城市" style="width:96px" />
+        <input id="g-town" placeholder="支行/县" style="width:120px" />
+        <input id="g-period" placeholder="期号" style="width:72px" />
+        <datalist id="list-prov"></datalist>
+        <datalist id="list-city"></datalist>
+        <span class="geo-hint">（保存前可改/增加）</span>
+      </div>
+      <div id="status" class="status"></div>
+      <div id="progress" class="progress" style="display:none;">
+        <div id="progress-fill" class="progress-fill"></div>
+        <span id="progress-text" class="progress-text"></span>
+      </div>
+      <div id="result-meta" class="result-meta"></div>
+    </section>
+
+    <section class="panel">
+      <div class="actions">
+        <button id="dl-clean" class="btn primary" disabled>⬇ 下载清洗表（含公式）</button>
+        <button id="dl-profit" class="btn primary" disabled>⬇ 下载利润表（含公式）</button>
+        <button id="dl-dash" class="btn ghost" disabled>看板网页</button>
+        <button id="save-btn" class="btn ghost">保存到本机</button>
+      </div>
+      <div class="actions" style="margin-top:10px;">
+        <button id="set-dir" class="btn small ghost">📂 设置保存目录</button>
+        <button id="clear-dir" class="btn small danger" style="display:none;">取消目录</button>
+        <span id="dir-label" style="font-size:12px;color:var(--sub);"></span>
+      </div>
+      <div style="font-size:12px;color:var(--sub);margin-top:10px;">
+        主按钮为下载结果；「保存到本机」将本次数据集存入浏览器 IndexedDB，下次无需重新上传即可查看。<b>设置「工作目录」后，下载与自动归档都会写入同一个 <code>{编号}__{名称}</code> 子文件夹</b>（需 Chrome/Edge + https/localhost）。左侧每条数据都标注了来源（💾仅浏览器 / 📁本地文件夹 / 🔗本地+浏览器），便于区分。
+      </div>
+    </section>
+
+    <section class="dash-card">
+      <div class="dh"><h2>📊 利润分析看板</h2>
+        <button id="dash-full" class="btn small ghost">⛶ 全屏</button>
+      </div>
+      <iframe id="dash-frame" title="利润分析看板" srcdoc=""></iframe>
+    </section>
+
+    <div class="foot">纯前端部署 · 可托管于腾讯云 EdgeOne Pages / COS 静态网站（免费） · 多人共用、无需登录</div>
+  </main>
+</div>
+
+<!-- 依赖加载顺序：解析 → 写出 → 黑名单 → 内嵌模板/看板/ECharts → 主逻辑 -->
+<script src="./lib/xlsx.full.min.js"></script>
+<script src="./lib/exceljs.min.js"></script>
+<script src="./lib/blacklist.js"></script>
+<script src="./lib/geo_china.js"></script>
+<script src="./lib/embed_template.js"></script>
+<script src="./lib/embed_dashboard.js"></script>
+<script src="./lib/embed_echarts.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
