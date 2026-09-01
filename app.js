@@ -549,6 +549,16 @@ function renderPreviewTable(headers, rows, editableCols, maxRows=5000){
   return wrap;
 }
 
+/* 把编辑后的原始记录重新写回 xlsx buffer，保证 persistCurrent / 工作目录归档用的是最新原始数据 */
+function recordsToRawBuffer(records, headers=STD){
+  const wb=XLSX.utils.book_new();
+  const aoa=[headers];
+  records.forEach(r=>{ aoa.push(headers.map(h=>r[h]!==undefined?r[h]:null)); });
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  XLSX.utils.book_append_sheet(wb,ws,'Sheet1');
+  return XLSX.write(wb,{bookType:'xlsx',type:'array'});
+}
+
 /* 根据当前 CURRENT 重新生成清洗表/利润表/看板 */
 async function rebuildCurrentOutputs(){
   const groups=groupByType(CURRENT.kept);
@@ -565,7 +575,7 @@ async function rebuildCurrentOutputs(){
 /* 从编辑后的原始记录重新跑完整流程 */
 async function recomputeFromRaw(records){
   if(!records || !records.length) throw new Error('原始记录为空');
-  const {kept}=cleanRecords(records);
+  const {kept, droppedZero, droppedNoType}=cleanRecords(records);
   if(!kept.length) throw new Error('清洗后无有效数据');
   const groups=groupByType(kept);
   const paperZero=detectPaperZero(records);
@@ -581,6 +591,10 @@ async function recomputeFromRaw(records){
   data.caliber=caliber; data.tax_info=taxInfo;
   CURRENT.kept=kept; CURRENT.stats=stats; CURRENT.paperZero=paperZero; CURRENT.data=data;
   CURRENT.rawRecords=records;
+  CURRENT.raw=recordsToRawBuffer(records); // 编辑后的原始数据写回 buffer，确保历史归档一致
+  CURRENT.rawRows=records.length;
+  CURRENT.droppedZero=droppedZero;
+  CURRENT.droppedNoType=droppedNoType;
   await rebuildCurrentOutputs();
 }
 
@@ -723,8 +737,8 @@ async function openPreviewRaw(){
   if(!CURRENT.rawRecords || !CURRENT.rawRecords.length){ alert('原始数据为空'); return; }
   PREVIEW_TYPE='raw'; PREVIEW_SCALE=100;
   $('preview-title').textContent='预览原始数据（可编辑）';
-  $('preview-sub').textContent=CURRENT.projectName+' ｜ '+CURRENT.rawRecords.length+' 行 ｜ 黄色单元格可直接修改';
-  const editable=new Set(['购买数量','码洋价','成本价','销售价','实付单价','实付金额','订单金额','税费','退款数量','退款积分小计','消费积分合计']);
+  $('preview-sub').textContent=CURRENT.projectName+' ｜ '+CURRENT.rawRecords.length+' 行 ｜ 所有单元格可直接修改，确认后重新跑清洗/利润/看板';
+  const editable=new Set(STD); // 原始数据所有列均可编辑
   $('preview-body').innerHTML='';
   $('preview-body').appendChild(renderPreviewTable(STD, CURRENT.rawRecords, editable));
   showPreviewModal();
@@ -733,8 +747,8 @@ async function openPreviewClean(){
   if(!CURRENT || !CURRENT.kept || !CURRENT.kept.length){ alert('请先分析一个文件'); return; }
   PREVIEW_TYPE='clean'; PREVIEW_SCALE=100;
   $('preview-title').textContent='预览清洗后数据（可编辑）';
-  $('preview-sub').textContent=CURRENT.projectName+' ｜ '+CURRENT.kept.length+' 行 ｜ 黄色单元格可直接修改';
-  const editable=new Set(['购买数量','码洋价','成本价','销售价','实付单价','实付金额','订单金额','税费','退款数量','退款积分小计','消费积分合计']);
+  $('preview-sub').textContent=CURRENT.projectName+' ｜ '+CURRENT.kept.length+' 行 ｜ 所有单元格可直接修改，确认后重新聚合利润/看板';
+  const editable=new Set(CLEAN_HEADER); // 清洗表所有列均可编辑
   $('preview-body').innerHTML='';
   $('preview-body').appendChild(renderPreviewTable(CLEAN_HEADER, CURRENT.kept, editable));
   showPreviewModal();
